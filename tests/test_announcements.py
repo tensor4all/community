@@ -27,7 +27,7 @@ def make_discussion(*, discussion_id="D_discussion_1", created_at=None, category
         "body": "Line one.\n\nLine two.\n\nhttps://tensor4all.org/update",
         "url": "https://github.com/orgs/tensor4all/discussions/1",
         "createdAt": created_at.isoformat().replace("+00:00", "Z"),
-        "author": {"login": "hiroshi"},
+        "author": {"login": "hiroshi", "name": "Hiroshi Shinaoka"},
         "category": {"name": category},
     }
 
@@ -92,10 +92,18 @@ class FormattingTests(unittest.TestCase):
         subject, body = format_google_groups_message(discussion)
 
         self.assertEqual(subject, "Launch update")
-        self.assertIn("Author: hiroshi", body)
+        self.assertIn("Author: Hiroshi Shinaoka", body)
         self.assertIn("Line one.", body)
         self.assertIn("Discussion URL:", body)
         self.assertIn(discussion["url"], body)
+
+    def test_google_groups_message_falls_back_to_login_when_name_missing(self):
+        discussion = make_discussion()
+        discussion["author"] = {"login": "hiroshi"}
+
+        _, body = format_google_groups_message(discussion)
+
+        self.assertIn("Author: hiroshi", body)
 
 
 class StateTests(unittest.TestCase):

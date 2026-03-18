@@ -30,6 +30,9 @@ query($owner: String!, $name: String!, $cursor: String) {
         createdAt
         author {
           login
+          ... on User {
+            name
+          }
         }
         category {
           name
@@ -78,7 +81,8 @@ def format_matrix_message(discussion: dict, summary_line_limit: int = 2) -> str:
 
 
 def format_google_groups_message(discussion: dict) -> tuple[str, str]:
-    author = ((discussion.get("author") or {}).get("login")) or "unknown"
+    author_data = discussion.get("author") or {}
+    author = author_data.get("name") or author_data.get("login") or "unknown"
     body = discussion.get("body", "").strip()
     message = "\n".join(
         [
