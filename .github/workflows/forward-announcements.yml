@@ -1,0 +1,53 @@
+name: Forward Announcements
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Forward announcements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SOURCE_OWNER: ${{ github.repository_owner }}
+          GITHUB_SOURCE_REPO: community
+          ANNOUNCEMENTS_STATE_PATH: state/sent-announcements.json
+          ANNOUNCEMENTS_MINIMUM_AGE_MINUTES: "10"
+          MATRIX_HOMESERVER_URL: ${{ secrets.MATRIX_HOMESERVER_URL }}
+          MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
+          MATRIX_ROOM_ID: ${{ secrets.MATRIX_ROOM_ID }}
+          MATRIX_BOT_USER_ID: ${{ secrets.MATRIX_BOT_USER_ID }}
+          GOOGLE_GROUPS_SMTP_HOST: ${{ secrets.GOOGLE_GROUPS_SMTP_HOST }}
+          GOOGLE_GROUPS_SMTP_PORT: ${{ secrets.GOOGLE_GROUPS_SMTP_PORT }}
+          GOOGLE_GROUPS_SMTP_USERNAME: ${{ secrets.GOOGLE_GROUPS_SMTP_USERNAME }}
+          GOOGLE_GROUPS_SMTP_APP_PASSWORD: ${{ secrets.GOOGLE_GROUPS_SMTP_APP_PASSWORD }}
+          GOOGLE_GROUPS_TO_ADDRESS: ${{ secrets.GOOGLE_GROUPS_TO_ADDRESS }}
+        run: python3 scripts/announcements.py
+
+      - name: Commit updated state
+        run: |
+          if git diff --quiet -- state/sent-announcements.json; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/sent-announcements.json
+          git commit -m "chore: update sent announcements state"
+          git push
