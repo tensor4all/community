@@ -223,6 +223,10 @@ def google_groups_sender_from_env() -> Callable[[dict, str, str], None]:
     return sender
 
 
+def google_groups_enabled() -> bool:
+    return os.environ.get("ENABLE_GOOGLE_GROUPS", "false").lower() == "true"
+
+
 def dry_run_matrix_sender(_: dict, __: str) -> None:
     return None
 
@@ -253,7 +257,12 @@ def main(argv: list[str]) -> int:
 
     state = load_state(state_path)
     sender_matrix = dry_run_matrix_sender if args.dry_run else matrix_sender_from_env()
-    sender_groups = dry_run_google_groups_sender if args.dry_run else google_groups_sender_from_env()
+    if args.dry_run:
+        sender_groups = dry_run_google_groups_sender
+    elif google_groups_enabled():
+        sender_groups = google_groups_sender_from_env()
+    else:
+        sender_groups = dry_run_google_groups_sender
 
     next_state = process_discussions(
         discussions=discussions,

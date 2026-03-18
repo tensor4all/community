@@ -34,6 +34,7 @@ jobs:
           MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
           MATRIX_ROOM_ID: ${{ secrets.MATRIX_ROOM_ID }}
           MATRIX_BOT_USER_ID: ${{ secrets.MATRIX_BOT_USER_ID }}
+          ENABLE_GOOGLE_GROUPS: "true"
           GOOGLE_GROUPS_SMTP_HOST: ${{ secrets.GOOGLE_GROUPS_SMTP_HOST }}
           GOOGLE_GROUPS_SMTP_PORT: ${{ secrets.GOOGLE_GROUPS_SMTP_PORT }}
           GOOGLE_GROUPS_SMTP_USERNAME: ${{ secrets.GOOGLE_GROUPS_SMTP_USERNAME }}

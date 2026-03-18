@@ -144,6 +144,8 @@ Why repository state:
 
 This keeps retry logic simple and avoids partially advanced state.
 
+During initial rollout, Google Groups delivery may be disabled while Matrix-only validation is performed. In that mode, Matrix remains active and email delivery is skipped by configuration.
+
 ## Permissions Model
 
 Permissions are intentionally strict only for `Announcements`.
