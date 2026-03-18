@@ -29,7 +29,7 @@ jobs:
           GITHUB_SOURCE_OWNER: ${{ github.repository_owner }}
           GITHUB_SOURCE_REPO: community
           ANNOUNCEMENTS_STATE_PATH: state/sent-announcements.json
-          ANNOUNCEMENTS_MINIMUM_AGE_MINUTES: "10"
+          ANNOUNCEMENTS_MINIMUM_AGE_MINUTES: "0"
           MATRIX_HOMESERVER_URL: ${{ secrets.MATRIX_HOMESERVER_URL }}
           MATRIX_ACCESS_TOKEN: ${{ secrets.MATRIX_ACCESS_TOKEN }}
           MATRIX_ROOM_ID: ${{ secrets.MATRIX_ROOM_ID }}

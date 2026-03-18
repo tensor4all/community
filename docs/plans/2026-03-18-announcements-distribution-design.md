@@ -21,27 +21,23 @@ Using the `Announcement` format is important because GitHub restricts new post c
 
 When a new post is created in `Announcements`:
 
-1. It is not sent immediately.
-2. A scheduled workflow checks periodically for unsent posts.
-3. A post becomes eligible for forwarding only after at least 10 minutes have passed since creation.
-4. Eligible unsent posts are forwarded to Matrix and Google Groups.
-5. After both deliveries succeed, the post is marked as sent in repository state.
-
-This gives a short correction window for typo fixes or link fixes without introducing a manual review flow.
+1. A scheduled or manually triggered workflow checks periodically for unsent posts.
+2. Eligible unsent posts are forwarded to Matrix and Google Groups.
+3. After both deliveries succeed, the post is marked as sent in repository state.
 
 ## Delivery Schedule
 
 - Trigger model: scheduled GitHub Actions polling
 - Frequency: once per hour
+- Manual trigger: `workflow_dispatch`
 - Eligibility rule:
   - post is in `Announcements`
   - post has not been sent before
-  - post was created at least 10 minutes earlier
 
 Rationale:
 
 - simpler than event-driven delayed execution
-- fewer workflow runs than 5-minute polling
+- easy to test by running the workflow manually
 - acceptable latency for announcement-style communication
 
 ## Distribution Targets
