@@ -6,9 +6,12 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 from scripts.announcements import (
+    bluesky_enabled,
+    bluesky_sender_from_env,
+    format_bluesky_message,
     format_google_groups_message,
     format_matrix_message,
     is_eligible_discussion,
@@ -30,6 +33,20 @@ def make_discussion(*, discussion_id="D_discussion_1", created_at=None, category
         "author": {"login": "hiroshi", "name": "Hiroshi Shinaoka"},
         "category": {"name": category},
     }
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 class EligibilityTests(unittest.TestCase):
@@ -105,6 +122,96 @@ class FormattingTests(unittest.TestCase):
 
         self.assertIn("Author: hiroshi", body)
 
+    def test_bluesky_message_contains_title_summary_and_url(self):
+        discussion = make_discussion()
+
+        message = format_bluesky_message(discussion)
+
+        self.assertIn("Launch update", message)
+        self.assertIn("Line one.", message)
+        self.assertIn("Line two.", message)
+        self.assertIn(discussion["url"], message)
+
+    def test_bluesky_message_truncates_summary_to_fit_post_limit(self):
+        discussion = make_discussion()
+        discussion["body"] = "\n".join(["A" * 120, "B" * 120, "C" * 120])
+
+        message = format_bluesky_message(discussion, max_length=120)
+
+        self.assertLessEqual(len(message), 120)
+        self.assertIn(discussion["url"], message)
+        self.assertIn("...", message)
+
+
+class BlueskyConfigTests(unittest.TestCase):
+    def test_bluesky_enabled_reads_env_flag(self):
+        with patch.dict(os.environ, {"ENABLE_BLUESKY": "true"}, clear=False):
+            self.assertTrue(bluesky_enabled())
+
+        with patch.dict(os.environ, {"ENABLE_BLUESKY": "false"}, clear=False):
+            self.assertFalse(bluesky_enabled())
+
+    def test_bluesky_sender_creates_session_and_post_record(self):
+        discussion = make_discussion()
+
+        with patch.dict(
+            os.environ,
+            {
+                "BLUESKY_IDENTIFIER": "tensor4all.bsky.social",
+                "BLUESKY_APP_PASSWORD": "app-password",
+            },
+            clear=True,
+        ):
+            with patch(
+                "scripts.announcements.request.urlopen",
+                side_effect=[
+                    FakeResponse({"accessJwt": "access-token", "did": "did:plc:tensor4all"}),
+                    FakeResponse({"uri": "at://did/app.bsky.feed.post/123", "cid": "bafy-test"}),
+                ],
+            ) as mock_urlopen:
+                sender = bluesky_sender_from_env()
+                sender(discussion)
+
+        session_request = mock_urlopen.call_args_list[0].args[0]
+        create_request = mock_urlopen.call_args_list[1].args[0]
+        session_payload = json.loads(session_request.data.decode("utf-8"))
+        create_payload = json.loads(create_request.data.decode("utf-8"))
+
+        self.assertEqual(
+            session_request.full_url,
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+        )
+        self.assertEqual(
+            create_request.full_url,
+            "https://bsky.social/xrpc/com.atproto.repo.createRecord",
+        )
+        self.assertEqual(
+            session_payload,
+            {"identifier": "tensor4all.bsky.social", "password": "app-password"},
+        )
+        self.assertEqual(create_payload["repo"], "did:plc:tensor4all")
+        self.assertEqual(create_payload["collection"], "app.bsky.feed.post")
+        self.assertEqual(create_payload["record"]["$type"], "app.bsky.feed.post")
+        self.assertEqual(
+            create_payload["record"]["text"],
+            format_bluesky_message(discussion),
+        )
+        self.assertIn(("Authorization", "Bearer access-token"), create_request.header_items())
+
+    def test_bluesky_sender_defers_authentication_until_delivery(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BLUESKY_IDENTIFIER": "tensor4all.bsky.social",
+                "BLUESKY_APP_PASSWORD": "app-password",
+            },
+            clear=True,
+        ):
+            with patch("scripts.announcements.request.urlopen") as mock_urlopen:
+                bluesky_sender_from_env()
+
+        self.assertEqual(mock_urlopen.call_count, 0)
+
 
 class StateTests(unittest.TestCase):
     def test_load_state_returns_empty_sent_ids_for_missing_file(self):
@@ -113,47 +220,80 @@ class StateTests(unittest.TestCase):
 
             self.assertEqual(load_state(state_path), {"sent_ids": {}})
 
-    def test_process_discussions_marks_sent_only_after_both_deliveries_succeed(self):
+    def test_process_discussions_marks_sent_only_after_all_enabled_deliveries_succeed(self):
         discussion = make_discussion()
         calls = []
 
-        def send_matrix(item, message):
-            calls.append(("matrix", item["id"], message))
+        def send_matrix(item):
+            calls.append(("matrix", item["id"]))
 
-        def send_email(item, subject, body):
-            calls.append(("email", item["id"], subject, body))
+        def send_email(item):
+            calls.append(("email", item["id"]))
+
+        def send_bluesky(item):
+            calls.append(("bluesky", item["id"]))
 
         result = process_discussions(
             discussions=[discussion],
             state={"sent_ids": {}},
             now=datetime.now(UTC),
             minimum_age_minutes=10,
-            matrix_sender=send_matrix,
-            google_groups_sender=send_email,
+            senders=[send_matrix, send_email, send_bluesky],
         )
 
         self.assertEqual(result["sent_ids"], {"D_discussion_1": ANY})
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
 
     def test_process_discussions_leaves_state_unchanged_on_partial_failure(self):
         discussion = make_discussion()
+        calls = []
 
-        def send_matrix(item, message):
+        def send_matrix(item):
+            calls.append(("matrix", item["id"]))
             return None
 
-        def send_email(item, subject, body):
-            raise RuntimeError("smtp failed")
+        def send_email(item):
+            calls.append(("email", item["id"]))
+            return None
+
+        def send_bluesky(item):
+            calls.append(("bluesky", item["id"]))
+            raise RuntimeError("bsky failed")
 
         result = process_discussions(
             discussions=[discussion],
             state={"sent_ids": {}},
             now=datetime.now(UTC),
             minimum_age_minutes=10,
-            matrix_sender=send_matrix,
-            google_groups_sender=send_email,
+            senders=[send_matrix, send_email, send_bluesky],
         )
 
         self.assertEqual(result["sent_ids"], {})
+        self.assertEqual(
+            calls,
+            [("matrix", "D_discussion_1"), ("email", "D_discussion_1"), ("bluesky", "D_discussion_1")],
+        )
+
+    def test_process_discussions_skips_disabled_destinations_by_omitting_senders(self):
+        discussion = make_discussion()
+        calls = []
+
+        def send_matrix(item):
+            calls.append(("matrix", item["id"]))
+
+        def send_bluesky(item):
+            calls.append(("bluesky", item["id"]))
+
+        result = process_discussions(
+            discussions=[discussion],
+            state={"sent_ids": {}},
+            now=datetime.now(UTC),
+            minimum_age_minutes=10,
+            senders=[send_matrix, send_bluesky],
+        )
+
+        self.assertEqual(result["sent_ids"], {"D_discussion_1": ANY})
+        self.assertEqual(calls, [("matrix", "D_discussion_1"), ("bluesky", "D_discussion_1")])
 
     def test_save_state_writes_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -167,7 +307,7 @@ class StateTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_cli_dry_run_processes_fixture_discussions(self):
+    def test_cli_dry_run_processes_fixture_discussions_with_bluesky_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             fixture_path = temp_path / "discussions.json"
@@ -183,6 +323,7 @@ class CliTests(unittest.TestCase):
                     "GITHUB_DISCUSSIONS_FIXTURE": str(fixture_path),
                     "ANNOUNCEMENTS_STATE_PATH": str(state_path),
                     "ANNOUNCEMENTS_MINIMUM_AGE_MINUTES": "10",
+                    "ENABLE_BLUESKY": "true",
                 },
                 capture_output=True,
                 text=True,

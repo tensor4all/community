@@ -6,6 +6,7 @@ Use GitHub Discussions as the source of truth for `tensor4all` announcements and
 
 - Matrix
 - Google Groups
+- Bluesky
 
 This design intentionally optimizes for simple, reliable one-way distribution rather than full cross-platform synchronization.
 
@@ -22,8 +23,8 @@ Using the `Announcement` format is important because GitHub restricts new post c
 When a new post is created in `Announcements`:
 
 1. A scheduled or manually triggered workflow checks periodically for unsent posts.
-2. Eligible unsent posts are forwarded to Matrix and Google Groups.
-3. After both deliveries succeed, the post is marked as sent in repository state.
+2. Eligible unsent posts are forwarded to all enabled downstream destinations.
+3. After every enabled delivery succeeds, the post is marked as sent in repository state.
 
 ## Delivery Schedule
 
@@ -92,6 +93,30 @@ Expected email style:
 
 Plain text is sufficient because the URL is the important payload and most mail clients will auto-link a full `https://...` URL.
 
+### Bluesky
+
+- Destination: `tensor4all.bsky.social`
+- Delivery method: direct AT Protocol HTTP calls to the account's PDS
+- Sender: dedicated bot account
+- Authentication: Bluesky app password stored in GitHub Actions secrets
+
+Required secrets:
+
+- `BLUESKY_IDENTIFIER`
+- `BLUESKY_APP_PASSWORD`
+
+Optional configuration:
+
+- `BLUESKY_SERVICE_URL`
+
+Expected post style:
+
+- title
+- short summary derived from the discussion body
+- original discussion URL
+
+Bluesky is treated as a notification channel, not a full-content mirror. Post text should stay within Bluesky limits, truncating the summary if needed while preserving the discussion URL.
+
 ## Message Formatting
 
 ### Matrix format
@@ -116,6 +141,16 @@ Recommended structure:
 
 This should favor readability and link integrity over rich formatting.
 
+### Bluesky format
+
+Recommended structure:
+
+- title
+- short summary derived from the discussion body
+- original GitHub Discussions URL
+
+This should stay concise like Matrix while respecting Bluesky post length limits.
+
 ## State Management
 
 Delivery state is stored in the repository as a JSON file.
@@ -138,13 +173,13 @@ Why repository state:
 
 ## Delivery Semantics
 
-- A post is marked sent only after both Matrix and Google Groups delivery succeed.
-- If either destination fails, the post remains unsent in state.
+- A post is marked sent only after all enabled destinations succeed.
+- If any enabled destination fails, the post remains unsent in state.
 - A later scheduled run retries it.
 
 This keeps retry logic simple and avoids partially advanced state.
 
-During initial rollout, Google Groups delivery may be disabled while Matrix-only validation is performed. In that mode, Matrix remains active and email delivery is skipped by configuration.
+During rollout, Google Groups or Bluesky delivery may be disabled while another destination is validated. In that mode, enabled destinations remain active and disabled ones are skipped by configuration.
 
 ## Permissions Model
 
@@ -163,6 +198,7 @@ Sensitive values include:
 
 - Matrix access token
 - Gmail App Password
+- Bluesky app password
 - destination addresses and room identifiers where appropriate
 
 No plaintext credentials should be committed into the repository.
@@ -182,6 +218,7 @@ The following are intentionally not part of the first implementation:
 - forwarding edits as follow-up updates
 - reverse sync from Matrix to GitHub
 - reverse sync from Google Groups to GitHub
+- reverse sync from Bluesky to GitHub
 - HTML email rendering
 - per-category fine-grained posting ACL beyond GitHub's built-in `Announcement` behavior
 - deletion propagation after a message has already been delivered
@@ -194,7 +231,8 @@ Minimal implementation can be split into:
 2. A script that queries GitHub Discussions for eligible posts
 3. A Matrix sender
 4. A Google Groups SMTP sender
-5. A state file updater
+5. A Bluesky sender
+6. A state file updater
 
 ## Open Follow-Up Items
 
@@ -202,5 +240,6 @@ These items are still implementation details, not design blockers:
 
 - exact GitHub API query shape for organization Discussions
 - exact summary generation rule for Matrix messages
+- exact summary truncation rule for Bluesky posts
 - exact JSON schema for `state/sent-announcements.json`
 - commit strategy for state updates from GitHub Actions
