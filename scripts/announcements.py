@@ -6,7 +6,6 @@ import os
 import smtplib
 import sys
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -43,11 +42,7 @@ query($owner: String!, $name: String!, $cursor: String) {
 }
 """
 
-
-@dataclass
-class DeliveryResult:
-    delivered_count: int
-    sent_ids: dict[str, str]
+BLUESKY_MAX_TEXT_LENGTH = 300
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -57,6 +52,16 @@ def parse_timestamp(value: str) -> datetime:
 def summarize_body(body: str, summary_line_limit: int = 2) -> str:
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     return "\n".join(lines[:summary_line_limit])
+
+
+def truncate_text(value: str, max_length: int, suffix: str = "...") -> str:
+    if max_length <= 0:
+        return ""
+    if len(value) <= max_length:
+        return value
+    if max_length <= len(suffix):
+        return suffix[:max_length]
+    return value[: max_length - len(suffix)].rstrip() + suffix
 
 
 def is_eligible_discussion(
@@ -98,6 +103,24 @@ def format_google_groups_message(discussion: dict) -> tuple[str, str]:
     return discussion["title"], message
 
 
+def format_bluesky_message(
+    discussion: dict,
+    summary_line_limit: int = 2,
+    max_length: int = BLUESKY_MAX_TEXT_LENGTH,
+) -> str:
+    summary = summarize_body(discussion.get("body", ""), summary_line_limit=summary_line_limit)
+    parts = [discussion["title"]]
+    if summary:
+        parts.append(summary)
+    base_text = "\n\n".join(part for part in parts if part)
+    url = discussion["url"]
+    separator = "\n\n"
+    available_text_length = max_length - len(separator) - len(url)
+    if available_text_length <= 0:
+        return truncate_text(url, max_length)
+    return f"{truncate_text(base_text, available_text_length)}{separator}{url}"
+
+
 def load_state(path: Path) -> dict:
     if not path.exists():
         return {"sent_ids": {}}
@@ -116,8 +139,7 @@ def process_discussions(
     state: dict,
     now: datetime,
     minimum_age_minutes: int,
-    matrix_sender: Callable[[dict, str], None],
-    google_groups_sender: Callable[[dict, str, str], None],
+    senders: list[Callable[[dict], None]],
 ) -> dict:
     next_state = deepcopy(state)
     next_state.setdefault("sent_ids", {})
@@ -131,11 +153,11 @@ def process_discussions(
         ):
             continue
 
-        matrix_message = format_matrix_message(discussion)
-        subject, email_body = format_google_groups_message(discussion)
+        if not senders:
+            continue
         try:
-            matrix_sender(discussion, matrix_message)
-            google_groups_sender(discussion, subject, email_body)
+            for sender in senders:
+                sender(discussion)
         except Exception:
             continue
         next_state["sent_ids"][discussion["id"]] = now.isoformat().replace("+00:00", "Z")
@@ -180,12 +202,13 @@ def load_discussions_from_github(owner: str, name: str, token: str) -> list[dict
         cursor = page_info["endCursor"]
 
 
-def matrix_sender_from_env() -> Callable[[dict, str], None]:
+def matrix_sender_from_env() -> Callable[[dict], None]:
     homeserver_url = os.environ["MATRIX_HOMESERVER_URL"].rstrip("/")
     room_id = os.environ["MATRIX_ROOM_ID"]
     access_token = os.environ["MATRIX_ACCESS_TOKEN"]
 
-    def sender(discussion: dict, message: str) -> None:
+    def sender(discussion: dict) -> None:
+        message = format_matrix_message(discussion)
         txn_id = parse.quote(discussion["id"], safe="")
         room = parse.quote(room_id, safe="")
         endpoint = f"{homeserver_url}/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn_id}"
@@ -205,14 +228,15 @@ def matrix_sender_from_env() -> Callable[[dict, str], None]:
     return sender
 
 
-def google_groups_sender_from_env() -> Callable[[dict, str, str], None]:
+def google_groups_sender_from_env() -> Callable[[dict], None]:
     smtp_host = os.environ.get("GOOGLE_GROUPS_SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("GOOGLE_GROUPS_SMTP_PORT", "587"))
     smtp_username = os.environ["GOOGLE_GROUPS_SMTP_USERNAME"]
     smtp_password = os.environ["GOOGLE_GROUPS_SMTP_APP_PASSWORD"]
     to_address = os.environ["GOOGLE_GROUPS_TO_ADDRESS"]
 
-    def sender(_: dict, subject: str, body: str) -> None:
+    def sender(discussion: dict) -> None:
+        subject, body = format_google_groups_message(discussion)
         message = EmailMessage()
         message["Subject"] = subject
         message["From"] = smtp_username
@@ -231,11 +255,63 @@ def google_groups_enabled() -> bool:
     return os.environ.get("ENABLE_GOOGLE_GROUPS", "false").lower() == "true"
 
 
-def dry_run_matrix_sender(_: dict, __: str) -> None:
+def bluesky_enabled() -> bool:
+    return os.environ.get("ENABLE_BLUESKY", "false").lower() == "true"
+
+
+def post_json(url: str, payload: dict, headers: dict[str, str] | None = None) -> dict:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    req = request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=request_headers,
+        method="POST",
+    )
+    with request.urlopen(req) as response:
+        return json.loads(response.read())
+
+
+def bluesky_sender_from_env() -> Callable[[dict], None]:
+    service_url = os.environ.get("BLUESKY_SERVICE_URL", "https://bsky.social").rstrip("/")
+    identifier = os.environ["BLUESKY_IDENTIFIER"]
+    app_password = os.environ["BLUESKY_APP_PASSWORD"]
+    session: dict[str, str] | None = None
+
+    def sender(discussion: dict) -> None:
+        nonlocal session
+        if session is None:
+            session = post_json(
+                f"{service_url}/xrpc/com.atproto.server.createSession",
+                {"identifier": identifier, "password": app_password},
+            )
+        post_json(
+            f"{service_url}/xrpc/com.atproto.repo.createRecord",
+            {
+                "repo": session["did"],
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": format_bluesky_message(discussion),
+                    "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                },
+            },
+            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+        )
+
+    return sender
+
+
+def dry_run_matrix_sender(_: dict) -> None:
     return None
 
 
-def dry_run_google_groups_sender(_: dict, __: str, ___: str) -> None:
+def dry_run_google_groups_sender(_: dict) -> None:
+    return None
+
+
+def dry_run_bluesky_sender(_: dict) -> None:
     return None
 
 
@@ -260,21 +336,18 @@ def main(argv: list[str]) -> int:
         discussions = load_discussions_from_github(owner, repo, token)
 
     state = load_state(state_path)
-    sender_matrix = dry_run_matrix_sender if args.dry_run else matrix_sender_from_env()
-    if args.dry_run:
-        sender_groups = dry_run_google_groups_sender
-    elif google_groups_enabled():
-        sender_groups = google_groups_sender_from_env()
-    else:
-        sender_groups = dry_run_google_groups_sender
+    senders = [dry_run_matrix_sender if args.dry_run else matrix_sender_from_env()]
+    if args.dry_run or google_groups_enabled():
+        senders.append(dry_run_google_groups_sender if args.dry_run else google_groups_sender_from_env())
+    if args.dry_run or bluesky_enabled():
+        senders.append(dry_run_bluesky_sender if args.dry_run else bluesky_sender_from_env())
 
     next_state = process_discussions(
         discussions=discussions,
         state=state,
         now=datetime.now(UTC),
         minimum_age_minutes=minimum_age_minutes,
-        matrix_sender=sender_matrix,
-        google_groups_sender=sender_groups,
+        senders=senders,
     )
     delivered_count = len(next_state["sent_ids"]) - len(state["sent_ids"])
 
